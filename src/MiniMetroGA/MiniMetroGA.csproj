@@ -1,0 +1,124 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>MiniMetroGA</AssemblyName>
+    <RootNamespace>MiniMetroGA</RootNamespace>
+    <LangVersion>9.0</LangVersion>
+    <DebugType>none</DebugType>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Version>1.0.0</Version>
+    <NoWarn>$(NoWarn);CS0649;CS0169</NoWarn>
+    <!-- O mscorlib do jogo esta stripado e nao tem TargetFrameworkAttribute nem
+         os atributos de AssemblyInfo gerados pelo SDK. Se emitirmos esses
+         atributos, o Mono nao consegue resolver o construtor deles ao carregar
+         a assembly pelo Doorstop. -->
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <!-- NADA de AllowUnsafeBlocks: codigo unsafe faz o compilador emitir
+         SecurityPermissionAttribute e UnverifiableCodeAttribute, que nao existem
+         no mscorlib stripado (o StripAudit acusa). -->
+
+    <!-- Ajuste GameDir se o jogo mudar de lugar (ou passe -p:GameDir=...) -->
+    <GameDir Condition="'$(GameDir)' == '' And '$(OS)' == 'Windows_NT'">G:\steam\steamapps\common\MiniMetro</GameDir>
+    <GameDir Condition="'$(GameDir)' == '' And '$(OS)' != 'Windows_NT'">$(HOME)/.local/share/Steam/steamapps/common/MiniMetro</GameDir>
+
+    <!-- A pasta de dados tem nome diferente por plataforma:
+         Windows: MiniMetro_Data (MiniMetro.exe)
+         Linux:   Mini Metro_Data (executavel "Mini Metro", com espaco) -->
+    <GameDataDir Condition="'$(GameDataDir)' == '' And Exists('$(GameDir)/MiniMetro_Data')">$(GameDir)/MiniMetro_Data</GameDataDir>
+    <GameDataDir Condition="'$(GameDataDir)' == '' And Exists('$(GameDir)/Mini Metro_Data')">$(GameDir)/Mini Metro_Data</GameDataDir>
+    <GameDataDir Condition="'$(GameDataDir)' == ''">$(GameDir)/MiniMetro_Data</GameDataDir>
+    <ManagedDir>$(GameDataDir)/Managed</ManagedDir>
+
+    <!-- O Mini Metro foi publicado com managed stripping: o IMGUI foi arrancado
+         das DLLs originais (o GUILayout de fabrica so tem Width e Height).
+         Compilamos e rodamos contra a IMGUIModule nao-stripada em MiniMetroGA/lib,
+         que o Doorstop carrega primeiro via dll_search_path_override
+         (DOORSTOP_MONO_DLL_SEARCH_PATH_OVERRIDE no Linux). -->
+    <ModLib>$(GameDir)/MiniMetroGA/lib</ModLib>
+    <ModBin>$(GameDir)/MiniMetroGA/bin</ModBin>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Compilamos contra o mscorlib/System DO JOGO, nao contra o targeting pack
+         do .NET Framework. O jogo foi publicado com managed stripping e faltam
+         dezenas de APIs (File.AppendAllText, System.Threading.Tasks.Parallel,
+         o ctor de RectOffset, ...). Apontando as refs para as DLLs reais, o
+         compilador acusa na hora em vez de o mod morrer em silencio no runtime. -->
+    <NoStdLib>true</NoStdLib>
+    <NoConfig>true</NoConfig>
+    <AddAdditionalExplicitAssemblyReferences>false</AddAdditionalExplicitAssemblyReferences>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- BCL do proprio jogo (stripada) -->
+    <Reference Include="mscorlib">
+      <HintPath>$(ManagedDir)/mscorlib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System">
+      <HintPath>$(ManagedDir)/System.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System.Core">
+      <HintPath>$(ManagedDir)/System.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Codigo do jogo -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(ManagedDir)/Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp-firstpass">
+      <HintPath>$(ManagedDir)/Assembly-CSharp-firstpass.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Modulos Unity que o jogo ja tem intactos -->
+    <Reference Include="UnityEngine">
+      <HintPath>$(ManagedDir)/UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(ManagedDir)/UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(ManagedDir)/UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(ManagedDir)/UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Substituidos por versoes nao-stripadas -->
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(ModLib)/UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="netstandard">
+      <HintPath>$(ModLib)/netstandard.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="DeployToGame" AfterTargets="Build">
+    <MakeDir Directories="$(ModBin)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModBin)" />
+    <Message Importance="high" Text="==&gt; MiniMetroGA.dll instalado em $(ModBin)" />
+
+    <!-- Nucleo nativo (native/mmopt), se ja foi compilado por build.sh/build.ps1.
+         Sem ele o mod usa o AG em C#. -->
+    <ItemGroup>
+      <NativeCore Include="$(MSBuildThisFileDirectory)../../native/mmopt/target/release/libmmopt.so" Condition="'$(OS)' != 'Windows_NT'" />
+      <NativeCore Include="$(MSBuildThisFileDirectory)../../native/mmopt/target/i686-pc-windows-msvc/release/mmopt.dll" Condition="'$(OS)' == 'Windows_NT'" />
+    </ItemGroup>
+    <Copy SourceFiles="@(NativeCore)" DestinationFolder="$(ModBin)" Condition="Exists('%(NativeCore.FullPath)')" />
+    <Message Importance="high" Text="==&gt; nucleo nativo instalado em $(ModBin)" Condition="Exists('%(NativeCore.FullPath)')" />
+  </Target>
+
+</Project>

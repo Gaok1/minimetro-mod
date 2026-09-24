@@ -1,0 +1,23 @@
+[package]
+name = "mmopt"
+version = "0.1.0"
+edition = "2021"
+description = "Nucleo nativo do otimizador do MiniMetroGA (AG + avaliador), carregado via P/Invoke."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "mmopt-bench"
+path = "src/bin/bench.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# unwind, nao abort: o FFI captura panico com catch_unwind em vez de derrubar o jogo
+panic = "unwind"
+debug = false
