@@ -30,13 +30,25 @@
       modelo. A primeira rodada lia a rota na ordem da lista de links e achava
       que a inserção no meio tinha falhado; o `ExtractRoute` agora segue as
       conexões.
-- [ ] Conferir em jogo o **movimento de trem/vagão entre linhas** e o
-      **interchange posto sozinho** (código pronto, ainda sem rodada que passasse
-      por eles).
-- [ ] **Chegar a 1000 passageiros em Londres** no self-test (o recorde com a v3
-      e a aplicação antiga foi 805, semana 7). Rodar
-      `MINIMETROGA_SELFTEST_SECONDS=1800` com a aplicação incremental e o
-      upgrade recomendado; se não chegar, olhar o que matou (log `SELFTEST`).
+- [x] Conferir em jogo o **movimento de trem/vagão entre linhas** e o
+      **interchange posto sozinho**. Londres, 2026-09-25: trens e vagões movidos
+      sem sumir passageiro, interchanges nas estações #11 e #17.
+- [x] **Chegar a 1000 passageiros em Londres** no self-test: 1064, semana 7
+      (2026-09-25), depois de a aplicação esperar a rede assentar. Ver
+      [[Diário de decisões]].
+- [ ] **Edição que precisa de travessia temporária.** Num arrasto de trecho o
+      link antigo fica `IsPendingMothball` e só devolve a travessia quando os
+      trens saem dele. Encaixar estação num trecho que cruza o rio, com um dos
+      trechos novos também cruzando, precisa de uma travessia **livre durante a
+      edição**, mesmo que a rede final caiba no estoque. Com 0 livres o jogo
+      recusa e o `Applier` redesenha a linha (Londres, 2026-09-25: `queria
+      2-8-1-0-15-19-27`, 0 travessias livres). `change.rs` deveria cobrar essa
+      edição como redesenho quando não há travessia livre.
+- [ ] **Passar da semana 7 em Londres.** A rodada de 1064 morreu depois de uma
+      pendência travada (corrigida) seguida de três rodadas redesenhando 3 a 4
+      linhas. Se o redesenho em massa continuar no fim de jogo, o custo de mexer
+      (`change.rs`) precisa enxergar o transiente: trem fora de serviço até voltar
+      do depósito e estação perto da capacidade sem atendimento nesse meio-tempo.
 - [ ] Otimização multiobjetivo (NSGA-II): expor a fronteira de Pareto entre tempo
       de viagem e lotação em vez de uma soma ponderada.
 - [x] Busca local (memético) no melhor indivíduo a cada N gerações. Feito no
@@ -52,8 +64,11 @@
 - [x] Remover o AG em C# (o nativo é o único otimizador).
 - [ ] Microssimulação discreta (as regras do [[Dossiê - o problema de otimização]]
       passo a passo) para validar o modelo analítico e reordenar os melhores.
-- [ ] Build nativo para Windows (`i686-pc-windows-msvc`); sem ele o Windows fica
-      sem otimizador (o AG em C# foi removido).
+- [ ] Build nativo para Windows. `build.ps1` compila `i686-pc-windows-msvc` e
+      `./build.sh --windows-dll` compila `i686-pc-windows-gnu` no Linux (mingw,
+      conferido com `objdump`: PE32, 13 exportações, só DLLs do sistema).
+      **Falta rodar num Windows de verdade** (ou no wine, que não está no cache
+      do nixpkgs). Ver [[Núcleo nativo (Rust)]].
 - [x] Modelar interchanges: capacidade da cidade (`InterchangeCapacity`) e
       embarque num pulso; o recomendador escolhe a estação.
 - [ ] Ferries/`LinkType.Nautical` — hoje ignorados.

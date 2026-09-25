@@ -67,9 +67,62 @@ namespace MiniMetroGA.Core
 
         private static readonly List<Pending> _pending = new List<Pending>();
         private static Snapshot _pendingSnap;
-        private static float _pendingUntil, _pendingNext;
+        private static float _pendingUntil, _pendingNext, _pendingSince;
+
+        /// <summary>Frota que a ultima rede pediu para cada linha (doadoras do Tick).</summary>
+        private static readonly List<Pending> _want = new List<Pending>();
+
+        /// <summary>
+        /// Rotas que o jogo recusou ha pouco (chave = rota, valor = quando). O AG
+        /// nao sabe da recusa e pede a mesma rota na rodada seguinte; apagar e
+        /// redesenhar de novo so manda trem para o deposito e volta com a mesma
+        /// linha (Londres, semana 7: "queria 2-8-1-0-15-19-27, ficou 2-8-1-0-19-27"
+        /// em rodadas seguidas, com 0 travessias livres).
+        /// </summary>
+        private static readonly Dictionary<string, float> _refused = new Dictionary<string, float>();
+        private const float RefusedForSec = 60f;
+
+        /// <summary>
+        /// Por quanto tempo (s reais) uma pendencia segura a proxima otimizacao.
+        /// Normalmente a frota entra em 1 a 5 s; passado isso, reotimizar sai mais
+        /// barato do que deixar estacao nova sem linha.
+        /// </summary>
+        private const float SettleCapSec = 10f;
 
         public static bool HasPending => _pending.Count > 0;
+
+        /// <summary>
+        /// A ultima aplicacao ainda esta assentando: linha apagada com trem
+        /// rodando (Line.Mothball so devolve o trem ao estoque quando ele termina
+        /// o trecho e desembarca todo mundo) ou linha esperando trem/vagao do
+        /// estoque. Otimizar agora le uma rede de passagem, com linha sem trem e
+        /// frota que nao esta nem no estoque nem em linha viva; o AG "conserta"
+        /// isso apagando mais linhas, e cada rodada deixa mais trem parado. Foi
+        /// o que derrubou Londres na semana 4 (2026-09-25).
+        /// </summary>
+        public static bool IsSettling(Game game)
+        {
+            if (_pending.Count > 0 && Time.realtimeSinceStartup - _pendingSince < SettleCapSec) return true;
+            return MothballedStillRunning(game);
+        }
+
+        /// <summary>Linha apagada cujo trem ainda nao voltou ao estoque.</summary>
+        private static bool MothballedStillRunning(Game game)
+        {
+            City city;
+            try { city = game != null ? game.City : null; } catch (Exception) { return false; }
+            if (city == null) return false;
+            try
+            {
+                for (int i = 0; i < city.LineCount; i++)
+                {
+                    var l = city.GetLine(i);
+                    if (l != null && l.IsMothballed && l.TrainCount > 0) return true;
+                }
+            }
+            catch (Exception) { }
+            return false;
+        }
 
         public static Result Apply(Game game, Snapshot snap, Genome genome)
         {
@@ -87,6 +140,7 @@ namespace MiniMetroGA.Core
             game.IsPaused = true;
             bool tipSuppressed = SetAmbiguousTipRequired(false);
             _pending.Clear();
+            _want.Clear();
 
             try
             {
@@ -101,6 +155,7 @@ namespace MiniMetroGA.Core
                 var cur = new List<Cur>();
                 foreach (var line in GameHook.GetLiveLines(city))
                 {
+                    ScrubOrphans(line);
                     var stops = Snapshot.ExtractRoute(line, idx);
                     if (stops == null) { MothballLine(line); res.LinesRemoved++; continue; }
                     cur.Add(new Cur { Line = line, Stops = stops, Loop = SafeLoop(line) && stops.Length >= 3 });
@@ -108,7 +163,6 @@ namespace MiniMetroGA.Core
 
                 // ---- casamento (igual ao change.rs) ----
                 var matchOf = new int[n];
-                var sameOf = new bool[n];
                 var insOf = new int[n];
                 for (int r = 0; r < n; r++) matchOf[r] = -1;
                 var order = new List<int>(cur.Count);
@@ -122,18 +176,16 @@ namespace MiniMetroGA.Core
                 foreach (int ci in order)
                 {
                     int best = -1, bestIns = int.MaxValue;
-                    bool bestSame = true;
                     for (int r = 0; r < n; r++)
                     {
                         if (matchOf[r] >= 0) continue;
                         bool gLoop = genome.Loops[r] && genome.Routes[r].Count >= 3;
                         int ins; bool same;
                         if (!Relation(cur[ci].Stops, cur[ci].Loop, genome.Routes[r], gLoop, out ins, out same)) continue;
-                        if (ins < bestIns) { best = r; bestIns = ins; bestSame = same; }
+                        if (ins < bestIns) { best = r; bestIns = ins; }
                     }
                     if (best < 0) continue;
                     matchOf[best] = ci;
-                    sameOf[best] = bestSame;
                     insOf[best] = bestIns;
                     curMatched[ci] = true;
                 }
@@ -147,30 +199,51 @@ namespace MiniMetroGA.Core
                 }
 
                 // ---- 2. linhas que ficam ou so ganham estacoes ----
+                // Uma edicao recusada volta para o fim da fila antes de a linha
+                // ser apagada: o estoque de travessias e da rede inteira, e a
+                // edicao que precisa de uma pode vir antes da que a libera (o
+                // total final cabe, a ordem e que nao).
                 var lineOf = new Line[n];
-                for (int r = 0; r < n; r++)
+                var retry = new List<int>();
+                for (int pass = 0; pass < 2; pass++)
                 {
-                    int ci = matchOf[r];
-                    if (ci < 0) continue;
-                    var c = cur[ci];
-                    if (insOf[r] == 0) { lineOf[r] = c.Line; res.LinesKept++; continue; }
-                    bool gLoop = genome.Loops[r] && genome.Routes[r].Count >= 3;
-                    string why = EditLine(game, snap, c.Line, c.Stops, genome.Routes[r], gLoop, sameOf[r]);
-                    var now = Snapshot.ExtractRoute(c.Line, idx);
-                    int ins2; bool same2;
-                    bool ok = why == null && now != null
-                              && Relation(now, SafeLoop(c.Line) && now.Length >= 3, genome.Routes[r], gLoop, out ins2, out same2)
-                              && ins2 == 0;
-                    if (ok)
+                    var todo = retry;
+                    if (pass == 0)
                     {
-                        lineOf[r] = c.Line;
-                        res.LinesEdited++;
-                        res.StationsInserted += insOf[r];
+                        todo = new List<int>();
+                        for (int r = 0; r < n; r++) if (matchOf[r] >= 0) todo.Add(r);
                     }
-                    else
+                    retry = new List<int>();
+                    foreach (int r in todo)
                     {
-                        Log.Warn(string.Format("Applier: edicao da linha {0} nao bateu ({1}); refazendo. queria {2}, ficou {3}",
-                            r + 1, why ?? "rota diferente", Join(genome.Routes[r]), now != null ? Join(now) : "-"));
+                        var c = cur[matchOf[r]];
+                        if (pass == 0 && insOf[r] == 0) { lineOf[r] = c.Line; res.LinesKept++; continue; }
+                        int[] now;
+                        string why = EditAndCheck(game, snap, idx, c.Line, genome.Routes[r], genome.Loops[r] && genome.Routes[r].Count >= 3, out now);
+                        if (why == null)
+                        {
+                            lineOf[r] = c.Line;
+                            res.LinesEdited++;
+                            res.StationsInserted += insOf[r];
+                            continue;
+                        }
+                        string msg = string.Format("Applier: edicao da linha {0} nao bateu ({1}; {2} travessia(s) livre(s)). queria {3}, ficou {4}",
+                            r + 1, why, FreeCrossings(game), Join(genome.Routes[r]), now != null ? Join(now) : "-");
+                        if (pass == 0)
+                        {
+                            Log.Info(msg + "; tenta de novo depois das outras");
+                            retry.Add(r);
+                            continue;
+                        }
+                        if (RecentlyRefused(genome.Routes[r], genome.Loops[r]))
+                        {
+                            Log.Info(msg + "; o jogo ja recusou esta rota, a linha fica como esta");
+                            lineOf[r] = c.Line;
+                            res.LinesKept++;
+                            continue;
+                        }
+                        Log.Warn(msg + "; refazendo");
+                        MarkRefused(genome.Routes[r], genome.Loops[r]);
                         MothballLine(c.Line);
                         res.LinesRemoved++;
                     }
@@ -195,10 +268,22 @@ namespace MiniMetroGA.Core
                     if (built == null) { res.LinesFailed++; continue; }
                     lineOf[r] = built;
                     res.LinesBuilt++;
+                    var got = Snapshot.ExtractRoute(built, idx);
+                    int ins3; bool same3;
+                    bool gLoop3 = genome.Loops[r] && route.Count >= 3;
+                    if (got == null || !Relation(got, SafeLoop(built) && got.Length >= 3, route, gLoop3, out ins3, out same3) || ins3 != 0)
+                    {
+                        Log.Warn(string.Format("Applier: linha {0} desenhada diferente ({1} travessia(s) livre(s)). queria {2}, ficou {3}",
+                            r + 1, FreeCrossings(game), Join(route), got != null ? Join(got) : "-"));
+                        MarkRefused(route, genome.Loops[r]);
+                    }
                 }
 
                 // ---- 4. frota ----
                 AdjustFleet(game, snap, genome, lineOf, ref res);
+                for (int r = 0; r < n; r++)
+                    if (lineOf[r] != null)
+                        _want.Add(new Pending { Line = lineOf[r], Locos = genome.Locos[r], Cars = genome.Cars[r] });
 
                 for (int r = 0; r < n; r++)
                 {
@@ -239,7 +324,8 @@ namespace MiniMetroGA.Core
             if (_pending.Count > 0)
             {
                 _pendingSnap = snap;
-                _pendingUntil = Time.realtimeSinceStartup + 60f;
+                _pendingSince = Time.realtimeSinceStartup;
+                _pendingUntil = _pendingSince + 60f;
                 _pendingNext = 0f;
             }
             return res;
@@ -263,17 +349,39 @@ namespace MiniMetroGA.Core
             }
             try
             {
+                // Quando mais nada vai voltar ao estoque, o que falta sai de linha
+                // com sobra: a locomotiva que volta do deposito vai para a primeira
+                // linha que o jogo marcou esperando (nao para a que a rede quer), e
+                // vagao que nao coube numa linha ainda sem trem fica onde estava.
+                // Sem isso a pendencia travava ate expirar (Londres, semana 7).
+                bool stockFinal = !MothballedStillRunning(game);
                 for (int i = _pending.Count - 1; i >= 0; i--)
                 {
                     var p = _pending[i];
                     if (p.Line == null || p.Line.IsMothballed || p.Line.Index < 0) { _pending.RemoveAt(i); continue; }
+                    int moved = 0;
                     if (p.Loop && p.Route.Count >= 3)
-                        PlaceLoopTrains(game, _pendingSnap, p.Line, p.Route, p.Locos, p.Rev, null);
+                    {
+                        PlaceLoopTrains(game, _pendingSnap, p.Line, p.Route, p.Locos, p.Rev,
+                            stockFinal ? Surplus(p.Line, p.Locos - TrainCountOf(p.Line)) : null, ref moved);
+                    }
                     else
+                    {
                         while (TrainCountOf(p.Line) < p.Locos && TryApplyAsset(p.Line, PreferredLocomotive(game))) { }
+                        if (stockFinal)
+                            foreach (var t in Surplus(p.Line, p.Locos - TrainCountOf(p.Line)))
+                                if (MoveTrain(t, p.Line, null, LineDirection.FORWARDS)) moved++;
+                    }
                     while (CarsOf(p.Line) < p.Cars && TryApplyAsset(p.Line, AssetType.Carriage)) { }
+                    if (stockFinal && TrainCountOf(p.Line) > 0)
+                        foreach (var car in SurplusCars(p.Line, p.Cars - CarsOf(p.Line)))
+                            if (MoveCar(car, p.Line)) moved++;
+                    if (moved > 0)
+                        Log.Info("Applier: " + moved + " trem(ns)/vagao(oes) tirados de linha com sobra para a linha " + SafeIndex(p.Line) + ".");
                     if (TrainCountOf(p.Line) >= p.Locos && CarsOf(p.Line) >= p.Cars) _pending.RemoveAt(i);
                 }
+                if (_pending.Count == 0)
+                    Log.Info(string.Format("Applier: frota pendente posta {0:N1} s (reais) depois da aplicacao.", now - _pendingSince));
             }
             catch (Exception e)
             {
@@ -283,6 +391,50 @@ namespace MiniMetroGA.Core
         }
 
         public static void ClearPending() => _pending.Clear();
+
+        private static string RouteKey(List<int> route, bool loop)
+        {
+            return (loop ? "o" : "-") + Join(route);
+        }
+
+        private static void MarkRefused(List<int> route, bool loop)
+        {
+            _refused[RouteKey(route, loop)] = Time.realtimeSinceStartup;
+        }
+
+        private static bool RecentlyRefused(List<int> route, bool loop)
+        {
+            float at;
+            return _refused.TryGetValue(RouteKey(route, loop), out at) && Time.realtimeSinceStartup - at < RefusedForSec;
+        }
+
+        /// <summary>Ate k trens de linhas que tem mais do que a ultima rede pediu.</summary>
+        private static List<Train> Surplus(Line except, int k)
+        {
+            var list = new List<Train>();
+            foreach (var w in _want)
+            {
+                if (list.Count >= k) break;
+                if (w.Line == except || w.Line == null || w.Line.IsMothballed) continue;
+                int extra = TrainCountOf(w.Line) - w.Locos;
+                if (extra > 0) list.AddRange(PickTrains(w.Line, Math.Min(extra, k - list.Count)));
+            }
+            return list;
+        }
+
+        /// <summary>Ate k vagoes de linhas que tem mais do que a ultima rede pediu.</summary>
+        private static List<Railcar> SurplusCars(Line except, int k)
+        {
+            var list = new List<Railcar>();
+            foreach (var w in _want)
+            {
+                if (list.Count >= k) break;
+                if (w.Line == except || w.Line == null || w.Line.IsMothballed) continue;
+                int extra = CarsOf(w.Line) - w.Cars;
+                if (extra > 0) list.AddRange(PickCars(w.Line, Math.Min(extra, k - list.Count)));
+            }
+            return list;
+        }
 
         private static bool IsPending(Line line)
         {
@@ -351,6 +503,32 @@ namespace MiniMetroGA.Core
         // ------------------------------------------------------------------
 
         /// <summary>
+        /// Leva a linha ate a rota g por gestos, partindo de como ela esta AGORA
+        /// no jogo (numa segunda tentativa ela pode ter ficado pela metade), e
+        /// confere o resultado. Devolve null se bateu, ou o motivo.
+        /// </summary>
+        private static string EditAndCheck(Game game, Snapshot snap, Dictionary<Station, int> idx, Line line, List<int> g, bool gLoop, out int[] now)
+        {
+            now = Snapshot.ExtractRoute(line, idx);
+            if (now == null) return "rota atual ilegivel";
+            int ins; bool same;
+            if (!Relation(now, SafeLoop(line) && now.Length >= 3, g, gLoop, out ins, out same)) return "rota atual nao cabe na nova";
+            if (ins == 0) return null;
+            string why = EditLine(game, snap, line, now, g, gLoop, same);
+            now = Snapshot.ExtractRoute(line, idx);
+            if (why != null) return why;
+            if (now == null) return "rota ilegivel depois da edicao";
+            if (!Relation(now, SafeLoop(line) && now.Length >= 3, g, gLoop, out ins, out same) || ins != 0) return "rota diferente";
+            return null;
+        }
+
+        private static int FreeCrossings(Game game)
+        {
+            try { return game.AssetDatabase.GetAvailableAssets(AssetType.Crossing); }
+            catch (Exception) { return -1; }
+        }
+
+        /// <summary>
         /// Encaixa na linha as estacoes que a rota nova tem a mais. Devolve null
         /// se todos os gestos rodaram, ou o motivo da falha.
         /// </summary>
@@ -387,7 +565,7 @@ namespace MiniMetroGA.Core
                 var mid = (sa.Position + sb.Position) * 0.5f;
                 lb.HandleLinkTouchBegan(lk, mid);
                 if (!lb.IsBuilding) return "o jogo nao deixou pegar o trecho " + c[k] + "-" + c[(k + 1) % c.Length];
-                TouchStations(game, lb, snap, line, gap);
+                TouchStations(game, lb, snap, line, gap, startIsA ? sa : sb, startIsA ? sb : sa);
                 if (lb.IsBuilding) lb.HandleTouchEnded();
                 RefreshTracks(line);
             }
@@ -426,22 +604,42 @@ namespace MiniMetroGA.Core
             if (term == null) return "terminal nao achado na estacao da ponta";
             lb.HandleTerminatorTouchBegan(term, end.Position);
             if (!lb.IsBuilding) return "o jogo nao deixou pegar o terminal";
-            TouchStations(game, lb, snap, line, stations);
+            TouchStations(game, lb, snap, line, stations, end, null);
             if (lb.IsBuilding) lb.HandleTouchEnded();
             RefreshTracks(line);
             return null;
         }
 
-        private static void TouchStations(Game game, LineBuilder lb, Snapshot snap, Line line, List<int> stations)
+        /// <summary>
+        /// Passa o dedo pelas estacoes, em ordem, a partir de `from`. Com `other`
+        /// (arrasto de trecho) o jogo tem duas pontas soltas, uma saindo de cada
+        /// estacao do trecho, e prende a estacao tocada s na ponta j que maximiza
+        /// |S_j - s|^2 - |S_j - ultimo toque|^2 = 2 (S_j - s).v - |v|^2, com
+        /// v = ultimo toque - s (LineBuilder.HandleStationTouchOver). Com o dedo
+        /// em cima da estacao (v = 0) quem decidia era o arredondamento, e duas
+        /// estacoes no mesmo trecho entravam na ordem trocada. Aqui o ultimo
+        /// toque fica um pouco para o lado de S_0 - S_1: a estacao sempre prende
+        /// na ponta que vem da anterior, qualquer que seja a geometria.
+        /// </summary>
+        private static void TouchStations(Game game, LineBuilder lb, Snapshot snap, Line line, List<int> stations, Station from, Station other)
         {
+            Vector2 prev = from != null ? from.Position : Vector2.zero;
             foreach (int s in stations)
             {
                 var st = snap.StationRefs[s];
                 if (st == null) continue;
-                lb.HandleTouchMove(ToGlobal(game, st.Position));
+                var touch = st.Position;
+                if (other != null)
+                {
+                    var d = prev - other.Position;
+                    float len = d.magnitude;
+                    if (len > 1e-3f) touch += d * (Mathf.Max(1f, 0.05f * len) / len);
+                }
+                lb.HandleTouchMove(ToGlobal(game, touch));
                 RefreshTracks(line);
                 lb.HandleStationTouchOver(st);
                 if (!lb.IsBuilding) break;
+                prev = st.Position;
             }
             RefreshTracks(line);
         }
@@ -592,7 +790,7 @@ namespace MiniMetroGA.Core
             try
             {
                 loco.State = RailcarState.MOTHBALLED;
-                if (target.ApplyAsset(type, pos, dir, loco, true, false, false)) return true;
+                if (SafeApply(target, type, pos, dir, loco)) return true;
             }
             catch (Exception e) { Log.Warn("Applier: mover trem: " + e.Message); }
             try { loco.State = RailcarState.ACTIVE; } catch (Exception) { }
@@ -604,7 +802,7 @@ namespace MiniMetroGA.Core
             try
             {
                 car.State = RailcarState.MOTHBALLED;
-                if (target.ApplyAsset(AssetType.Carriage, null, LineDirection.FORWARDS, car, true, false, false)) return true;
+                if (SafeApply(target, AssetType.Carriage, null, LineDirection.FORWARDS, car)) return true;
             }
             catch (Exception e) { Log.Warn("Applier: mover vagao: " + e.Message); }
             try { car.State = RailcarState.ACTIVE; } catch (Exception) { }
@@ -681,14 +879,62 @@ namespace MiniMetroGA.Core
 
         private static bool TryApplyAsset(Line line, AssetType type)
         {
-            try { return line.ApplyAsset(type, null, LineDirection.FORWARDS, null, true, false, false); }
-            catch (Exception) { return false; }
+            return SafeApply(line, type, null, LineDirection.FORWARDS, null);
         }
 
-        private static void PlaceLoopTrains(Game game, Snapshot snap, Line line, List<int> route, int want, int rev, List<Train> spare)
+        private static int _applyErrors;
+
+        /// <summary>
+        /// Line.ApplyAsset sem deixar estrago. Line.AddTrain poe o trem na lista
+        /// da linha ANTES de Train.Start criar a locomotiva; se o Start estoura
+        /// no meio, sobra um trem oco, e Line.ActiveTrainCount (que o jogo chama
+        /// em Game.IsPaused, no placar de conquistas...) passa a estourar em todo
+        /// frame (Londres, 2026-09-25, logo depois de encaixar uma estacao no meio
+        /// de um trecho). Aqui a falha vai para o log e o trem oco sai da linha.
+        /// </summary>
+        private static bool SafeApply(Line line, AssetType type, TrackPosition? pos, LineDirection dir, Railcar existing)
         {
-            int moved = 0;
-            PlaceLoopTrains(game, snap, line, route, want, rev, spare, ref moved);
+            try { return line.ApplyAsset(type, pos, dir, existing, true, false, false); }
+            catch (Exception e)
+            {
+                if (_applyErrors++ < 5)
+                    Log.Warn("Applier: ApplyAsset(" + type + (existing != null ? ", movido" : "") + ") na linha "
+                             + SafeIndex(line) + " estourou: " + e);
+                ScrubOrphans(line);
+                return false;
+            }
+        }
+
+        private static FieldInfo _lineTrains;
+
+        /// <summary>Tira da linha os trens sem locomotiva (ver SafeApply).</summary>
+        private static void ScrubOrphans(Line line)
+        {
+            try
+            {
+                if (_lineTrains == null)
+                    _lineTrains = typeof(Line).GetField("trains", BindingFlags.NonPublic | BindingFlags.Instance);
+                var list = _lineTrains != null ? _lineTrains.GetValue(line) as List<Train> : null;
+                if (list == null) return;
+                int removed = 0;
+                for (int i = list.Count - 1; i >= 0; i--)
+                {
+                    var t = list[i];
+                    if (t == null || t.Locomotive != null) continue;
+                    // Line.RemoveTrain le a locomotiva: tira direto da lista
+                    try { if (!t.Link.IsNull) t.Link.Link.RemoveTrain(t); } catch (Exception) { }
+                    list.RemoveAt(i);
+                    removed++;
+                }
+                if (removed > 0)
+                    Log.Warn("Applier: " + removed + " trem(ns) sem locomotiva tirado(s) da linha " + SafeIndex(line) + ".");
+            }
+            catch (Exception e) { Log.Warn("Applier: limpeza de trem sem locomotiva: " + e.Message); }
+        }
+
+        private static int SafeIndex(Line line)
+        {
+            try { return line.Index; } catch (Exception) { return -1; }
         }
 
         /// <summary>
@@ -759,9 +1005,7 @@ namespace MiniMetroGA.Core
                             ? new TrackPosition(lk.FirstTrack, 0f)
                             : new TrackPosition(lk.LastTrack, lk.LastTrack.Length);
                         var dir = gameFwd ? LineDirection.FORWARDS : LineDirection.BACKWARDS;
-                        bool ok;
-                        try { ok = line.ApplyAsset(type, pos, dir, null, true, false, false); }
-                        catch (Exception) { ok = false; }
+                        bool ok = SafeApply(line, type, pos, dir, null);
                         if (!ok && spare != null && spare.Count > 0)
                         {
                             var t = spare[0];
@@ -935,6 +1179,16 @@ namespace MiniMetroGA.Core
                 {
                     var link = line[i];
                     if (link != null) link.Update();
+                }
+                // Link.Update so regenera a lista de trilhos; quem liga
+                // NextTrack/PreviousTrack e soma o comprimento e o GenerateGeo do
+                // LateUpdate (depois da solda, que olha os vizinhos). Sem isso, um
+                // trem posto no mesmo frame estoura em TrackPosition.LinkDistance,
+                // que anda de FirstTrack por NextTrack (Londres, 2026-09-25).
+                for (int i = 0; i < line.Count; i++)
+                {
+                    var link = line[i];
+                    if (link != null) link.LateUpdate();
                 }
             }
             catch (Exception e) { Log.Warn("RefreshTracks: " + e.Message); }

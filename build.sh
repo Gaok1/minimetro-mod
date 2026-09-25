@@ -5,6 +5,7 @@
 #     ./build.sh --run           compila, instala e abre o jogo
 #     ./build.sh --run --tail    idem, e segue o log
 #     ./build.sh --setup         so baixa/instala Doorstop + lib/ (sem compilar)
+#     ./build.sh --windows-dll   so compila o nucleo nativo para o Windows (x86)
 #
 # Opcoes:
 #     --game-dir <dir>           pasta do jogo (default: Steam em ~/.local/share)
@@ -23,6 +24,7 @@ RUN=0
 TAIL=0
 SETUP_ONLY=0
 NATIVE=1
+WINDOWS_DLL=0
 ORIG_ARGS=("$@")
 
 while [ $# -gt 0 ]; do
@@ -31,13 +33,50 @@ while [ $# -gt 0 ]; do
         --tail) TAIL=1 ;;
         --setup) SETUP_ONLY=1 ;;
         --no-native) NATIVE=0 ;;
+        --windows-dll) WINDOWS_DLL=1 ;;
         --game-dir) GAME_DIR="$2"; shift ;;
         -c|--configuration) CONFIG="$2"; shift ;;
-        -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
         *) echo "opcao desconhecida: $1" 1>&2; exit 1 ;;
     esac
     shift
 done
+
+say()  { printf '\033[36m%s\033[0m\n' "$*"; }
+ok()   { printf '\033[32m%s\033[0m\n' "$*"; }
+warn() { printf '\033[33m%s\033[0m\n' "$*"; }
+die()  { printf '\033[31m%s\033[0m\n' "$*" 1>&2; exit 1; }
+
+# Nucleo nativo para o jogo de Windows (x86, 32 bits), compilado daqui com
+# mingw: i686-pc-windows-gnu. Sai em native/mmopt/target/i686-pc-windows-gnu/
+# release/mmopt.dll, que o csproj instala no Windows se nao houver o build MSVC.
+# No NixOS o gcc do mingw usa o modelo de threads mcf: o libgcc_eh pede a
+# mcfgthread e o Rust pede -lpthread, entao as duas entram estaticas (a DLL so
+# depende de DLLs do sistema).
+build_windows_dll() {
+    local dir="$REPO/native/mmopt" target=i686-pc-windows-gnu
+    command -v rustup >/dev/null 2>&1 && rustup target add "$target" >/dev/null
+    if [ -z "${MINIMETROGA_IN_MINGW:-}" ] && ! command -v i686-w64-mingw32-gcc >/dev/null 2>&1; then
+        command -v nix >/dev/null 2>&1 || die "i686-w64-mingw32-gcc nao encontrado (instale o mingw-w64)."
+        say "entrando no mingw32 do nixpkgs..."
+        local pth mcf
+        pth="$(nix build --no-link --print-out-paths nixpkgs#pkgsCross.mingw32.windows.pthreads)"
+        mcf="$(nix build --no-link --print-out-paths nixpkgs#pkgsCross.mingw32.windows.mcfgthreads)"
+        MINIMETROGA_IN_MINGW=1 \
+        CARGO_TARGET_I686_PC_WINDOWS_GNU_RUSTFLAGS="-L native=$pth/lib -C link-arg=$mcf/lib/libmcfgthread.a -C link-arg=-lntdll -C link-arg=-lkernel32" \
+            exec nix shell nixpkgs#pkgsCross.mingw32.buildPackages.gcc -c "$0" --windows-dll
+    fi
+    say "compilando o nucleo nativo para Windows x86 ($target)..."
+    (cd "$dir" && CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER=i686-w64-mingw32-gcc \
+        cargo build --release --lib --target "$target") || die "falha ao compilar a DLL do Windows."
+    ok "nucleo nativo (Windows x86): $dir/target/$target/release/mmopt.dll"
+}
+
+if [ $WINDOWS_DLL -eq 1 ]; then
+    command -v cargo >/dev/null 2>&1 || die "cargo nao encontrado."
+    build_windows_dll
+    exit 0
+fi
 
 GAME_DIR="$(cd "$GAME_DIR" && pwd -P)"
 MOD_DIR="$GAME_DIR/MiniMetroGA"
@@ -51,11 +90,6 @@ UNITYLIBS_URL="https://unity.bepinex.dev/libraries/2022.3.62.zip"
 IMGUI_SHA="881b8feb0c5cf9906a38b17dfa1aeccfd7ad99bc31d82cddf0286a0faed3b8cb"
 CORLIBS_URL="https://unity.bepinex.dev/corlibs/2022.3.62.zip"
 NETSTD_SHA="bf0b7eac9010b75413e4ec1a07a3453bc6a68eeb8e916fbed7c1f2777841f7c7"
-
-say()  { printf '\033[36m%s\033[0m\n' "$*"; }
-ok()   { printf '\033[32m%s\033[0m\n' "$*"; }
-warn() { printf '\033[33m%s\033[0m\n' "$*"; }
-die()  { printf '\033[31m%s\033[0m\n' "$*" 1>&2; exit 1; }
 
 [ -x "$GAME_DIR/Mini Metro" ] || [ -f "$GAME_DIR/MiniMetro.exe" ] \
     || die "Mini Metro nao encontrado em $GAME_DIR (use --game-dir)."

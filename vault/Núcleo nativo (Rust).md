@@ -239,9 +239,23 @@ Linux, `LoadLibraryW` no Windows. Só depois o `DllImport("mmopt")` resolve:
   copia a `libmmopt.so` para `MiniMetroGA/bin`. No NixOS, se faltar
   `cargo`/`dotnet`, o script se reexecuta em `nix shell`. `--no-native` pula o
   núcleo.
-- **Windows:** o jogo é 32-bit, então o alvo é `i686-pc-windows-msvc`
-  (`cargo build --release --target i686-pc-windows-msvc`); o csproj copia
-  `mmopt.dll` se existir. Sem ela o otimizador fica desligado.
+- **Windows:** o jogo é 32-bit. Dois caminhos, o csproj instala o que existir
+  (MSVC primeiro):
+  - no Windows, `build.ps1` roda `cargo build --release --lib --target
+    i686-pc-windows-msvc` (precisa de rustup e das build tools do Visual
+    Studio; `-NoNative` pula);
+  - no Linux, `./build.sh --windows-dll` compila `i686-pc-windows-gnu` com o
+    mingw. No NixOS o gcc do mingw usa o modelo de threads **mcf**: o
+    `libgcc_eh` pede a `mcfgthread` e o Rust pede `-l:libpthread.a`, que esse
+    mingw não traz. O script liga as duas **estáticas** (`windows.pthreads` e
+    `windows.mcfgthreads` do `pkgsCross.mingw32`), e a DLL só depende de DLLs do
+    sistema (`KERNEL32`, `msvcrt`, `NTDLL`, `USERENV`, `WS2_32`,
+    `bcryptprimitives`, `api-ms-win-core-synch`). Exporta as 13 funções `mm_*`
+    (conferido com `objdump -p`). **Ainda não rodou num Windows de verdade**: o
+    wine não está no cache binário do nixpkgs e compilar o wine inteiro para
+    testar não compensou.
+
+  Sem nenhuma das duas o otimizador fica desligado.
 
 ## Rodar fora do jogo
 
@@ -263,6 +277,20 @@ o game over (`MINIMETROGA_SELFTEST_PAUSE=0` não pausa). Na segunda-feira o
 `UpgradeAdvisor` escolhe o upgrade pela recomendação e põe o interchange.
 `MINIMETROGA_SELFTEST_QUIT=1` fecha o jogo no fim. Tudo vai para o log com o
 prefixo `SELFTEST`.
+
+**Largada avançada** (`MINIMETROGA_SELFTEST_START_WEEK=N`, `Core/WeekJump.cs`):
+antes da primeira rodada o `Clock.Time` vai para a meia-noite de segunda da
+semana N, e o resto é o próprio jogo. As estações cujo horário passou abrem no
+próximo `Station.Update`, a demanda sai com `Clock.Tension` da semana N e o
+spawn não acumula os dias pulados (cada estação só cria os passageiros do dia
+corrente; caindo na meia-noite, não sai rajada). `Game.ScheduleAudioEvents` anda
+o relógio hora a hora e conta um prêmio por segunda atravessada: a tela de
+upgrade abre com "Locomotive xN" e N escolhas, que o `UpgradeAdvisor` resolve.
+O `WeekJump.Finish` confere que entrou uma locomotiva por semana. Londres, semana
+6: 29 estações, ~40 s até a primeira rodada, a rede inteira desenhada de uma vez.
+
+`MINIMETROGA_SELFTEST_CHANGE_WEIGHT` troca o peso do custo de mexer na rede
+(`GaConfig.ChangeWeight`) para comparar partidas.
 
 Com `MINIMETROGA_SELFTEST_MODE=validate`, de tempos em tempos ele aplica a
 melhor rede, **congela** e mede no jogo o que o modelo previu (ver

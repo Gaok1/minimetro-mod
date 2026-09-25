@@ -62,7 +62,10 @@ MiniMetroGA/
 .\build.ps1 -Run -Tail # compila, abre o jogo e segue o log
 ```
 
-Precisa apenas do .NET SDK no PATH.
+Precisa do .NET SDK no PATH. O núcleo nativo (o otimizador) sai do `cargo`
+(alvo `i686-pc-windows-msvc`, o jogo de Windows é 32 bits), se houver Rust
+instalado; `-NoNative` pula. Sem Rust no Windows, dá para compilar a DLL no Linux
+(`./build.sh --windows-dll`, abaixo) e o csproj a instala.
 
 ### Linux (build nativo da Steam)
 
@@ -78,7 +81,9 @@ Depois, na Steam, em **Mini Metro → Propriedades → Opções de inicializaç�
 ```
 
 Se o jogo estiver em outro lugar: `./build.sh --game-dir <pasta>`. O `build.sh`
-também compila o núcleo nativo com `cargo` (`--no-native` pula). No NixOS o
+também compila o núcleo nativo com `cargo` (`--no-native` pula), e
+`./build.sh --windows-dll` compila o núcleo para o jogo de Windows (x86, com
+mingw), sem precisar do jogo instalado. No NixOS o
 `dotnet` e o `cargo` vêm sozinhos via `nix shell`. Detalhes em
 `vault/Linux - build nativo.md` e `vault/Núcleo nativo (Rust).md`.
 
@@ -105,6 +110,18 @@ MINIMETROGA_SELFTEST_QUIT=1 <jogo>/MiniMetroGA/run.sh
 ```
 
 No NixOS, o executável da Steam precisa de `steam-run` na frente do `run.sh`.
+
+Para não esperar o fim de jogo, `MINIMETROGA_SELFTEST_START_WEEK=N` pula a
+partida para a semana N antes da primeira rodada, pelo relógio do próprio jogo:
+as estações daquela semana abrem, a tela de upgrade oferece as N escolhas (o
+recomendador escolhe) e a demanda sai com a tensão da semana N. A rede começa
+vazia. Londres na semana 6 fica pronta em ~40 s, com 29 estações.
+`MINIMETROGA_SELFTEST_CHANGE_WEIGHT` muda o peso do custo de mexer na rede.
+
+```bash
+MINIMETROGA_SELFTEST=london MINIMETROGA_SELFTEST_START_WEEK=6 \
+MINIMETROGA_SELFTEST_SECONDS=1200 MINIMETROGA_SELFTEST_QUIT=1 <jogo>/MiniMetroGA/run.sh
+```
 
 Validação do modelo contra o jogo (congela a rede em janelas e mede o que o
 modelo previu; ver `vault/Validação do modelo.md`):

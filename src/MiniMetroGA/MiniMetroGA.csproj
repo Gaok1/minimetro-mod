@@ -112,10 +112,16 @@
     <Message Importance="high" Text="==&gt; MiniMetroGA.dll instalado em $(ModBin)" />
 
     <!-- Nucleo nativo (native/mmopt), se ja foi compilado por build.sh/build.ps1.
-         Sem ele o mod usa o AG em C#. -->
+         Sem ele o otimizador fica desligado. No Windows vale o build MSVC
+         (build.ps1) ou, sem ele, o do mingw feito no Linux (opcao windows-dll do build.sh). -->
+    <PropertyGroup>
+      <NativeDir>$(MSBuildThisFileDirectory)../../native/mmopt/target</NativeDir>
+      <WinCore>$(NativeDir)/i686-pc-windows-msvc/release/mmopt.dll</WinCore>
+      <WinCore Condition="!Exists('$(WinCore)')">$(NativeDir)/i686-pc-windows-gnu/release/mmopt.dll</WinCore>
+    </PropertyGroup>
     <ItemGroup>
-      <NativeCore Include="$(MSBuildThisFileDirectory)../../native/mmopt/target/release/libmmopt.so" Condition="'$(OS)' != 'Windows_NT'" />
-      <NativeCore Include="$(MSBuildThisFileDirectory)../../native/mmopt/target/i686-pc-windows-msvc/release/mmopt.dll" Condition="'$(OS)' == 'Windows_NT'" />
+      <NativeCore Include="$(NativeDir)/release/libmmopt.so" Condition="'$(OS)' != 'Windows_NT'" />
+      <NativeCore Include="$(WinCore)" Condition="'$(OS)' == 'Windows_NT'" />
     </ItemGroup>
     <Copy SourceFiles="@(NativeCore)" DestinationFolder="$(ModBin)" Condition="Exists('%(NativeCore.FullPath)')" />
     <Message Importance="high" Text="==&gt; nucleo nativo instalado em $(ModBin)" Condition="Exists('%(NativeCore.FullPath)')" />

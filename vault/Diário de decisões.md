@@ -5,6 +5,80 @@ Adicione entradas novas no topo.
 
 ---
 
+## 2026-09-25 — 1300 em Londres: a rede precisa assentar, e mexer tem que custar
+
+Objetivo: a rodada longa do self-test (Londres, 1800 s) que ficou faltando.
+
+| Rodada | Código | Resultado |
+|---|---|---|
+| 1 | commit anterior | game over, **450**, semana 4 |
+| 2 | + espera assentar, ordem no trecho, 2ª volta da edição | travou na semana 1 (trem sem locomotiva) |
+| 3 | + `SafeApply` | game over, **1064**, semana 7 (o recorde anterior era 805) |
+| 4 | + frota tirada de linha com sobra, teto de 10 s na espera | game over, **727**, semana 5 |
+| 5 | idem, **peso de mexer 10** | game over, **1300**, semana 8 (recorde) |
+
+Linhas apagadas por partida (total / nas últimas 10 aplicações): rodada 3,
+25 / 16; rodada 4, 23 / 17; rodada 5 (peso 10), 13 / 7. Com peso 1 a morte é
+sempre um redesenho em massa no fim; com peso 10 foi capacidade (41 estações).
+Uma partida por configuração ainda é pouco para mudar o padrão (continua 1).
+
+- **Thrash da aplicação incremental.** Na rodada 1, das rodadas 49 a 57 cada
+  aplicação redesenhou 2 a 4 linhas com até 6 trens "esperando o estoque". O
+  `Line.Mothball` só devolve o trem quando ele termina o trecho, então a rodada
+  seguinte (7 s depois) lia linhas sem trem, a "rede atual" valia 2.000 a 7.500 e
+  o AG apagava mais. O recorde antigo (805) era do `Line.Remove`, que devolvia o
+  trem na hora e sumia com os passageiros. `Applier.IsSettling` agora segura o
+  self-test e o modo automático. Na rodada 3 só 2 de 20 aplicações até a semana 3
+  apagaram linha (na rodada 1 foram 20 de 48).
+- **Ordem das estações no meio de um trecho** saía trocada (`11-16-15-3` →
+  `11-15-16-3`, duas vezes). O `LineBuilder` escolhe a ponta solta por
+  `2 (S_j − s)·v − |v|²`, e com o dedo em cima da estação (`v = 0`) quem decidia
+  era o arredondamento. O toque agora vai um pouco para o lado da estação
+  anterior. Rodada 3: zero edições que não bateram.
+- **Edição recusada ganha uma segunda volta**, depois das outras, antes de a linha
+  ser apagada. A suspeita é o estoque de travessias (Londres tem 3, todas em uso),
+  mas ainda não houve recusa desde então para confirmar; o log registra as
+  travessias livres.
+- **Trem sem locomotiva.** `Line.AddTrain` põe o trem na lista antes de
+  `Train.Start` criar a locomotiva. Um `Start` que estoura no meio deixa um trem
+  oco, e `Game.Update` (via `Train.DistanceToNextTrain`) passa a estourar em todo
+  frame; nem `Line.RemoveTrain` o tira. O `TryApplyAsset` engolia a exceção.
+  Agora todo `ApplyAsset` passa por `SafeApply`, que loga e tira o trem oco por
+  reflexão. Na rodada 5 o log trouxe a causa: `TrackPosition.LinkDistance` anda
+  de `FirstTrack` por `NextTrack`, e o `RefreshTracks` do mod só chamava
+  `Link.Update`, que regenera a lista de trilhos; quem liga `NextTrack` é o
+  `GenerateGeo` do `Link.LateUpdate`. Trem posto no mesmo frame de uma edição
+  achava a corrente solta. O `RefreshTracks` agora chama os dois.
+- **Pendência travada.** A rodada 3 morreu assim: um vagão devia ir da L4 para a
+  L2 nova, mas a L2 ainda não tinha trem, o `MoveCar` falhou e o estoque de vagões
+  era zero. A pendência esperou 60 s, a espera segurou a otimização, e na volta
+  (35 estações, rede atual 3.766) três rodadas seguidas redesenharam 3 a 4 linhas.
+  Agora a espera tem teto de 10 s, e o `Tick`, quando nada mais vai voltar ao
+  estoque, tira trem ou vagão de linha que tem mais do que a rede pediu. É o que
+  o jogo também faz errado: a locomotiva que volta do depósito vai para a
+  primeira linha marcada `IsWaitingForLocomotive`, não para a que o genoma quer.
+- **Interchange posto sozinho**, pela primeira vez em jogo: estações #11 (−4,1%)
+  e #17 (−1,3%).
+- **Travessia temporária.** Com 0 travessias livres, encaixar a estação 15 no
+  trecho 0-19 foi recusado duas rodadas seguidas, e o redesenho da linha saiu
+  igual (sem a 15). No arrasto de trecho o link antigo só devolve a travessia
+  quando os trens saem dele. O `Applier` agora confere a linha desenhada e não
+  apaga de novo, por 60 s, uma rota que o jogo acabou de recusar; o modelo ainda
+  não sabe disso (ver [[Roadmap]]).
+- **Largada avançada** (`MINIMETROGA_SELFTEST_START_WEEK`), pedida para não
+  esperar 10 minutos até o fim de jogo: o relógio pula para a semana N e o jogo
+  abre as estações, acumula os prêmios ("Locomotive x6" e seis escolhas na semana
+  6) e ajusta a demanda. Londres na semana 6: 29 estações em ~40 s. Começando com
+  a rede vazia, as duas partidas morreram em 3 a 3,5 min (432 e 534
+  passageiros): é um teste de estresse mais duro que a partida normal.
+- **Upgrade "+0,0%" não é bug.** No bench com o problema da semana 2: controle,
+  linha e vagão dão exatamente a base (lotação de linha 0, pior linha a 51%; linha
+  sem trem novo não serve), travessia −3,7%.
+- **Núcleo para Windows:** `./build.sh --windows-dll` (mingw, `i686-pc-windows-gnu`);
+  `build.ps1` compila `i686-pc-windows-msvc`. Detalhes em [[Núcleo nativo (Rust)]].
+
+---
+
 ## 2026-09-24 — aplicar mexendo só no que mudou, upgrade recomendado, travessia inviável
 
 Objetivo: o otimizador chegar a 1000 passageiros, escolher upgrade e descartar

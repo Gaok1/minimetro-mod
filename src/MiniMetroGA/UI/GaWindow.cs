@@ -103,7 +103,8 @@ namespace MiniMetroGA.UI
             if (_auto && !AutoLocked && game != null && !_engine.IsRunning && !_autoWaitingToApply)
             {
                 _autoTimer += Time.unscaledDeltaTime;
-                if (_autoTimer >= _autoIntervalSec)
+                // espera a ultima aplicacao assentar (ver Applier.IsSettling)
+                if (_autoTimer >= _autoIntervalSec && !Applier.IsSettling(game))
                 {
                     _autoTimer = 0f;
                     if (_autoPauseWhileSolving) game.IsPaused = true;
